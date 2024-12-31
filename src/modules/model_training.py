@@ -105,14 +105,49 @@ class ModelTraining:
             logger.error(f"Error loading training data: {str(e)}")
             raise
 
+    def _prepare_logistic_growth(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Prepare data for logistic growth by adding floor and cap values.
+        
+        Args:
+            df: Input DataFrame
+            
+        Returns:
+            DataFrame with floor and cap values added
+        """
+        # Calculate reasonable floor and cap values
+        historical_min = df['y'].min()
+        historical_max = df['y'].max()
+        historical_std = df['y'].std()
+        
+        # Set floor to 0 since stock prices can't be negative
+        floor = 0
+        # Set cap to historical max plus some room for growth
+        cap = historical_max + 2 * historical_std
+        
+        # Add cap and floor to dataframe
+        df = df.copy()
+        df['floor'] = floor
+        df['cap'] = cap
+        
+        logger.info(f"Set growth bounds: floor={floor:.2f}, cap={cap:.2f}")
+        return df
+    
     def configure_prophet(
         self,
+        df: pd.DataFrame,
         regressors: Optional[List[str]] = None
-    ) -> Prophet:
+    ) -> Tuple[Prophet, pd.DataFrame]:
         """Configure and return a Prophet model instance."""
         try:
+            # Prepare data for logistic growth
+            df = self._prepare_logistic_growth(df)
+            
             # Initialize Prophet with basic configuration
             model = Prophet(
+                growth='logistic',  # Use logistic growth to prevent negative predictions
+                changepoint_prior_scale=0.05,  # Reduce flexibility
+                changepoint_range=0.9,  # Use more historical data for changepoints
                 seasonality_mode=self.seasonality_mode,
                 yearly_seasonality=self.yearly_seasonality,
                 weekly_seasonality=self.weekly_seasonality,
@@ -125,7 +160,7 @@ class ModelTraining:
                     model.add_regressor(regressor)
                     logger.info(f"Added regressor: {regressor}")
             
-            return model
+            return model, df
             
         except Exception as e:
             logger.error(f"Error configuring Prophet model: {str(e)}")
@@ -150,8 +185,39 @@ class ModelTraining:
     ) -> Prophet:
         """Train the Prophet model."""
         try:
-            # Configure model
-            model = self.configure_prophet(regressors)
+            # Calculate reasonable floor and cap values
+            historical_min = df['y'].min()
+            historical_max = df['y'].max()
+            historical_std = df['y'].std()
+            
+            # Set floor to 0 since stock prices can't be negative
+            floor = 0
+            # Set cap to historical max plus some room for growth
+            cap = historical_max + 2 * historical_std
+            
+            # Add cap and floor to dataframe for logistic growth
+            df = df.copy()
+            df['floor'] = floor
+            df['cap'] = cap
+            
+            logger.info(f"Set growth bounds: floor={floor:.2f}, cap={cap:.2f}")
+            
+            # Configure model with logistic growth
+            model = Prophet(
+                growth='logistic',  # Use logistic growth to prevent negative predictions
+                changepoint_prior_scale=0.05,  # Reduce flexibility
+                changepoint_range=0.9,  # Use more historical data for changepoints
+                seasonality_mode='multiplicative',  # Better for stock prices
+                yearly_seasonality=self.yearly_seasonality,
+                weekly_seasonality=self.weekly_seasonality,
+                daily_seasonality=self.daily_seasonality
+            )
+            
+            # Add regressors if specified
+            if regressors:
+                for regressor in regressors:
+                    model.add_regressor(regressor)
+                    logger.info(f"Added regressor: {regressor}")
             
             # Fit model
             logger.info("Starting model training...")
@@ -494,6 +560,52 @@ class ModelTraining:
         
         logger.info("Cross-validation completed")
         return metrics
+
+    def prepare_model(self, data: pd.DataFrame) -> Prophet:
+        """
+        Prepare and configure the Prophet model.
+        
+        Args:
+            data: DataFrame containing the data to train on
+            
+        Returns:
+            Configured Prophet model
+        """
+        # Calculate reasonable floor and cap values
+        historical_min = data['y'].min()
+        historical_max = data['y'].max()
+        historical_std = data['y'].std()
+        
+        # Set floor to 0 since stock prices can't be negative
+        floor = 0
+        # Set cap to historical max plus some room for growth
+        cap = historical_max + 2 * historical_std
+        
+        # Add cap and floor to dataframe
+        data['floor'] = floor
+        data['cap'] = cap
+        
+        # Configure Prophet model with logistic growth
+        model = Prophet(
+            growth='logistic',  # Use logistic growth instead of linear
+            changepoint_prior_scale=0.05,  # Slightly reduce flexibility
+            changepoint_range=0.9,  # Consider more of the historical data for changepoints
+            yearly_seasonality=True,
+            weekly_seasonality=True,
+            daily_seasonality=False,
+            seasonality_mode='multiplicative'  # Better for stock prices
+        )
+        
+        # Add any custom seasonalities if configured
+        if self.config.get('seasonalities'):
+            for name, params in self.config['seasonalities'].items():
+                model.add_seasonality(
+                    name=name,
+                    period=params['period'],
+                    fourier_order=params.get('fourier_order', 5)
+                )
+        
+        return model, data
 
 def initialize() -> ModelTraining:
     """Initialize the model training module with configuration."""
