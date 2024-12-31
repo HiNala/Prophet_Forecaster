@@ -1,0 +1,177 @@
+# Data Processing Settings
+data:
+  min_data_points: 30
+  date_format: '%Y-%m-%d'
+  default_columns:
+    datetime: 'ds'
+    target: 'y'
+  allowed_intervals: ['1m', '2m', '5m', '15m', '30m', '60m', '90m', '1h', '1d', '5d', '1wk', '1mo', '3mo']
+
+# Data Cleaning Settings
+cleaning:
+  missing_values:
+    default_method: 'impute'
+    allowed_methods: ['drop', 'ffill', 'bfill', 'impute', 'interpolate']
+    max_missing_pct: 0.1
+  outliers:
+    default_method: 'zscore'
+    allowed_methods: ['zscore', 'iqr', 'isolation_forest', 'none']
+    zscore_threshold: 3.0
+    iqr_multiplier: 1.5
+    contamination: 0.1  # for isolation forest
+
+# Technical Indicators
+indicators:
+  min_data_points: 100
+  max_missing_pct: 0.1
+  
+  trend:
+    sma:
+      window: 20
+      min_periods: 1
+    ema:
+      window: 20
+      min_periods: 1
+  
+  momentum:
+    rsi:
+      window: 14
+      min_periods: 1
+  
+  volatility:
+    bollinger_bands:
+      window: 20
+      window_dev: 2
+      min_periods: 1
+  
+  volume:
+    vwap:
+      window: 14
+      min_periods: 1
+
+# Model Settings
+model:
+  prophet:
+    seasonality_mode: 'additive'
+    yearly_seasonality: 'auto'
+    weekly_seasonality: 'auto'
+    daily_seasonality: 'auto'
+    changepoint_prior_scale: 0.05
+    seasonality_prior_scale: 10.0
+  
+  training:
+    default_periods: 60
+    max_periods: 365
+    test_size: 0.2
+    validation_size: 0.2
+  
+  hyperparameter_tuning:
+    n_trials: 50
+    timeout: 3600  # 1 hour
+    parameters:
+      changepoint_prior_scale: [0.001, 0.01, 0.1, 0.5]
+      seasonality_prior_scale: [0.01, 0.1, 1.0, 10.0]
+      holidays_prior_scale: [0.01, 0.1, 1.0, 10.0]
+      seasonality_mode: ['additive', 'multiplicative']
+  
+  cross_validation:
+    initial: '365 days'
+    period: '30 days'
+    horizon: '60 days'
+    parallel: 'processes'
+    n_jobs: -1
+  
+  ensemble:
+    methods: ['stacking', 'weighted_average', 'voting']
+    base_models: ['prophet', 'lightgbm', 'xgboost']
+    stacking:
+      meta_model: 'ridge'
+      cv_folds: 5
+    weighted_average:
+      weight_method: 'inverse_error'
+      error_metric: 'rmse'
+    voting:
+      method: 'soft'
+  
+  forecast:
+    default_periods: 60
+    confidence_interval: 0.95
+    include_history: true
+
+# Feature Engineering
+features:
+  lagged_features:
+    lags: [1, 7, 14, 30]
+    target_only: false
+  rolling_features:
+    windows: [7, 14, 30]
+    statistics: ['mean', 'std', 'min', 'max']
+  calendar_features:
+    enable: true
+    holidays: true
+    special_days: true
+
+# Evaluation Settings
+evaluation:
+  metrics: ['mape', 'mae', 'rmse', 'coverage', 'direction_accuracy']
+  cross_validation: true
+  rolling_window_size: 30
+  backtesting:
+    enable: true
+    windows: 3
+    step_size: '30 days'
+
+# Visualization Settings
+visualization:
+  figure_size: [1200, 800]
+  theme: 'plotly_dark'
+  colors:
+    actual: 'blue'
+    forecast: 'red'
+    ci: 'rgba(255, 0, 0, 0.2)'
+    trend: 'green'
+    seasonality: 'purple'
+    volume: 'gray'
+  output_format: ['html', 'png']
+  dpi: 300
+  interactive: true
+
+# Logging Settings
+logging:
+  level: 'INFO'
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+  file: 'logs/prophet_forecaster.log'
+  max_bytes: 10485760  # 10MB
+  backup_count: 5
+  console_output: true
+
+# File Paths and Organization
+paths:
+  data:
+    root: 'data'
+    raw: 'data/raw'
+    processed: 'data/processed'
+    interim: 'data/interim'
+    features: 'data/features'
+    visualizations: 'data/visualizations'
+  
+  models:
+    root: 'models'
+    trained: 'models/trained'
+    metadata: 'models/metadata'
+    evaluation: 'models/evaluation'
+  
+  forecasts:
+    root: 'forecasts'
+    predictions: 'forecasts/predictions'
+    visualizations: 'forecasts/visualizations'
+    evaluation: 'forecasts/evaluation'
+  
+  logs: 'logs'
+  docs: 'docs'
+
+# Version Control
+versioning:
+  enable: true
+  format: '%Y%m%d_%H%M%S'
+  keep_versions: 5 
