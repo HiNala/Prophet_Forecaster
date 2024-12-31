@@ -1,388 +1,407 @@
 """
-Forecasting module for the Prophet Forecaster application.
-Handles forecast generation, visualization, and evaluation.
+Forecasting module for generating and visualizing Prophet predictions.
 """
 
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, List, Optional, Tuple
-import os
 from prophet import Prophet
-from prophet.plot import plot_cross_validation_metric
+from typing import Dict, Any, Optional, List, Union
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import pickle
+import os
+from datetime import datetime, timedelta
 import json
-from datetime import datetime
+import pickle
 
-from ..utils import logger, config_loader
+from ..utils.logger import setup_logger
+
+logger = setup_logger()
 
 class Forecasting:
+    """Handles forecast generation and visualization."""
+    
     def __init__(self, config: Dict[str, Any]):
-        """Initialize the forecasting module with configuration."""
+        """Initialize Forecasting with configuration."""
         self.config = config
-        self.model_config = config.get('model', {})
+        self.forecast_dir = "forecasts/predictions"
+        os.makedirs(self.forecast_dir, exist_ok=True)
+        self._model = None
         
-        # Forecasting configuration
-        self.forecast_config = self.model_config.get('forecast', {})
-        self.default_periods = self.forecast_config.get('default_periods', 60)
-        self.confidence_interval = self.forecast_config.get('confidence_interval', 0.95)
-        
-        # Visualization configuration
-        self.viz_config = config.get('visualization', {})
-        self.figure_size = self.viz_config.get('figure_size', [1200, 800])
-        self.line_colors = self.viz_config.get('colors', {
-            'actual': 'blue',
-            'forecast': 'red',
-            'ci': 'rgba(255, 0, 0, 0.2)'
-        })
-        
-        # Paths
-        self.model_dir = "models"
-        self.output_dir = "forecasts"
-        os.makedirs(self.output_dir, exist_ok=True)
-
-    def load_latest_model(self) -> Tuple[Prophet, Dict[str, Any]]:
-        """Load the most recent trained model and its metadata."""
-        try:
-            # Find latest model file
-            model_files = [f for f in os.listdir(self.model_dir) if f.endswith('.pkl')]
-            if not model_files:
-                raise FileNotFoundError("No trained models found")
-            
-            latest_model = max(model_files, key=lambda x: os.path.getctime(os.path.join(self.model_dir, x)))
-            model_path = os.path.join(self.model_dir, latest_model)
-            
-            # Load model
-            with open(model_path, 'rb') as f:
-                model = pickle.load(f)
-            
-            # Load corresponding metadata
-            # Get the timestamp from the model filename (format: prophet_model_YYYYMMDD_HHMMSS.pkl)
-            timestamp = latest_model.replace('prophet_model_', '').replace('.pkl', '')
-            metadata_path = os.path.join(self.model_dir, f"model_metadata_{timestamp}.json")
-            
-            if not os.path.exists(metadata_path):
-                logger.warning(f"Metadata file not found at {metadata_path}")
-                # Try to find metadata file by matching timestamp pattern
-                metadata_files = [f for f in os.listdir(self.model_dir) if f.startswith('model_metadata_')]
-                if metadata_files:
-                    metadata_path = os.path.join(self.model_dir, max(metadata_files, key=lambda x: os.path.getctime(os.path.join(self.model_dir, x))))
-                    logger.info(f"Using metadata file: {metadata_path}")
-            
-            with open(metadata_path, 'r') as f:
-                metadata = json.load(f)
-            
-            logger.info(f"Loaded model from {latest_model}")
-            return model, metadata
-            
-        except Exception as e:
-            logger.error(f"Error loading model: {str(e)}")
-            raise
-
-    def load_test_data(self) -> pd.DataFrame:
-        """Load the test dataset."""
-        try:
-            test_path = "data/prophet_test.csv"
-            if not os.path.exists(test_path):
-                raise FileNotFoundError("Test data not found")
-            
-            return pd.read_csv(test_path)
-            
-        except Exception as e:
-            logger.error(f"Error loading test data: {str(e)}")
-            raise
-
+    @property
+    def model(self) -> Optional[Prophet]:
+        """Get the current Prophet model."""
+        if self._model is None:
+            # Try to load the latest model
+            try:
+                model_files = [f for f in os.listdir("models") if f.endswith('.pkl')]
+                if model_files:
+                    latest_model = max(model_files, key=lambda x: os.path.getctime(os.path.join("models", x)))
+                    model_path = os.path.join("models", latest_model)
+                    with open(model_path, 'rb') as f:
+                        self._model = pickle.load(f)
+                    logger.info(f"Loaded model from {model_path}")
+            except Exception as e:
+                logger.warning(f"Could not load model: {str(e)}")
+        return self._model
+    
+    @model.setter
+    def model(self, value: Prophet) -> None:
+        """Set the current Prophet model."""
+        self._model = value
+    
     def generate_forecast(
         self,
         model: Prophet,
-        periods: int = None,
+        periods: int = 30,
         include_history: bool = True
-    ) -> pd.DataFrame:
-        """Generate forecast using the trained model."""
-        try:
-            if periods is None:
-                periods = self.default_periods
+    ) -> Dict[str, pd.DataFrame]:
+        """
+        Generate forecasts using the trained Prophet model.
+        
+        Args:
+            model: Trained Prophet model
+            periods: Number of periods to forecast
+            include_history: Whether to include historical data in the forecast
             
-            # Create future dataframe
-            future = model.make_future_dataframe(
-                periods=periods,
-                include_history=include_history
-            )
-            
-            # Add any required regressors for future dates
-            for regressor in model.extra_regressors:
-                if regressor in future.columns:
-                    continue
-                # For now, use the mean of historical values
-                historical_mean = model.history[regressor].mean()
-                future[regressor] = historical_mean
-            
-            # Generate forecast
-            forecast = model.predict(future)
-            logger.info(f"Generated forecast for {periods} periods")
-            
-            return forecast
-            
-        except Exception as e:
-            logger.error(f"Error generating forecast: {str(e)}")
-            raise
-
-    def calculate_forecast_metrics(
+        Returns:
+            Dict containing forecast DataFrame and components
+        """
+        logger.info(f"Generating forecast for {periods} periods")
+        
+        # Get the last date in the training data
+        last_date = model.history['ds'].max()
+        logger.info(f"Last date in training data: {last_date.strftime('%Y-%m-%d')}")
+        
+        # Create future dataframe starting from the last date
+        future = model.make_future_dataframe(
+            periods=periods,
+            freq='D',
+            include_history=include_history
+        )
+        
+        # Generate forecast
+        forecast = model.predict(future)
+        
+        # Get historical data from the model
+        history = model.history
+        
+        # Save predictions to file
+        self._save_predictions(forecast, history, periods, last_date)
+        
+        return {
+            'forecast': forecast,
+            'history': history
+        }
+    
+    def _save_predictions(
         self,
         forecast: pd.DataFrame,
-        actuals: pd.DataFrame
-    ) -> Dict[str, float]:
-        """Calculate forecast accuracy metrics."""
-        try:
-            # Ensure datetime columns are in the same format
-            forecast['ds'] = pd.to_datetime(forecast['ds'])
-            actuals['ds'] = pd.to_datetime(actuals['ds'])
+        history: pd.DataFrame,
+        periods: int,
+        last_training_date: pd.Timestamp
+    ) -> None:
+        """Save predictions to a text file."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"forecast_predictions_{timestamp}.txt"
+        filepath = os.path.join(self.forecast_dir, filename)
+        
+        # Get future predictions (dates after the last training date)
+        future_predictions = forecast[forecast['ds'] > last_training_date].copy()
+        future_predictions = future_predictions.tail(periods)  # Get only the requested number of periods
+        
+        with open(filepath, 'w') as f:
+            f.write("Prophet Forecast Predictions\n")
+            f.write(f"Generated at: {timestamp}\n")
+            f.write("=" * 50 + "\n\n")
             
-            # Merge forecast with actuals
-            merged = forecast.merge(
-                actuals[['ds', 'y']],
-                on='ds',
-                how='inner',
-                suffixes=('_pred', '')
-            )
+            f.write("Forecast Details:\n")
+            f.write(f"Last training date: {last_training_date.strftime('%Y-%m-%d')}\n")
+            f.write(f"Number of forecast periods: {periods}\n")
+            f.write(f"Forecast start date: {future_predictions['ds'].min().strftime('%Y-%m-%d')}\n")
+            f.write(f"Forecast end date: {future_predictions['ds'].max().strftime('%Y-%m-%d')}\n\n")
             
-            # Calculate metrics
-            metrics = {
-                'mape': np.mean(np.abs((merged['y'] - merged['yhat']) / merged['y'])) * 100,
-                'mae': np.mean(np.abs(merged['y'] - merged['yhat'])),
-                'rmse': np.sqrt(np.mean((merged['y'] - merged['yhat'])**2)),
-                'coverage': np.mean((merged['y'] >= merged['yhat_lower']) & 
-                                 (merged['y'] <= merged['yhat_upper'])) * 100
-            }
+            f.write("Daily Predictions:\n")
+            f.write("-" * 80 + "\n")
+            f.write("Date            | Predicted Value | Lower Bound (95%) | Upper Bound (95%) |\n")
+            f.write("-" * 80 + "\n")
             
-            logger.info("Calculated forecast metrics")
-            return metrics
+            for _, row in future_predictions.iterrows():
+                f.write(f"{row['ds'].strftime('%Y-%m-%d')} | {row['yhat']:14.2f} | {row['yhat_lower']:15.2f} | {row['yhat_upper']:15.2f} |\n")
             
-        except Exception as e:
-            logger.error(f"Error calculating metrics: {str(e)}")
-            raise
-
+            # Add summary statistics
+            f.write("\nSummary Statistics:\n")
+            f.write("-" * 40 + "\n")
+            f.write(f"Mean prediction: {future_predictions['yhat'].mean():.2f}\n")
+            f.write(f"Min prediction:  {future_predictions['yhat'].min():.2f}\n")
+            f.write(f"Max prediction:  {future_predictions['yhat'].max():.2f}\n")
+            f.write(f"Std deviation:   {future_predictions['yhat'].std():.2f}\n")
+        
+        logger.info(f"Predictions saved to {filepath}")
+        
+        # Also save as CSV for further analysis
+        csv_filepath = os.path.join(self.forecast_dir, f"forecast_predictions_{timestamp}.csv")
+        future_predictions.to_csv(csv_filepath, index=False)
+        logger.info(f"Predictions also saved as CSV to {csv_filepath}")
+    
     def plot_forecast(
         self,
-        forecast: pd.DataFrame,
-        history: pd.DataFrame = None,
-        show_components: bool = True,
-        output_path: Optional[str] = None
+        results: Dict[str, pd.DataFrame],
+        output_dir: str = "forecasts"
     ) -> None:
-        """Create interactive forecast visualization."""
-        try:
-            # Create figure with secondary y-axis
-            fig = make_subplots(
-                rows=3 if show_components else 1,
-                cols=1,
-                subplot_titles=['Forecast', 'Trend', 'Seasonalities'] if show_components else ['Forecast'],
-                row_heights=[0.5, 0.25, 0.25] if show_components else [1],
-                vertical_spacing=0.1
-            )
-            
-            # Plot actual values if available
-            if history is not None:
-                fig.add_trace(
-                    go.Scatter(
-                        x=history['ds'],
-                        y=history['y'],
-                        name='Actual',
-                        line=dict(color=self.line_colors['actual'])
-                    ),
-                    row=1, col=1
-                )
-            
-            # Plot forecast
-            fig.add_trace(
-                go.Scatter(
-                    x=forecast['ds'],
-                    y=forecast['yhat'],
-                    name='Forecast',
-                    line=dict(color=self.line_colors['forecast'])
-                ),
-                row=1, col=1
-            )
-            
-            # Add confidence intervals
-            fig.add_trace(
-                go.Scatter(
-                    x=forecast['ds'].tolist() + forecast['ds'].tolist()[::-1],
-                    y=forecast['yhat_upper'].tolist() + forecast['yhat_lower'].tolist()[::-1],
-                    fill='toself',
-                    fillcolor=self.line_colors['ci'],
-                    line=dict(color='rgba(255,255,255,0)'),
-                    name='Confidence Interval'
-                ),
-                row=1, col=1
-            )
-            
-            if show_components:
-                # Plot trend
-                fig.add_trace(
-                    go.Scatter(
-                        x=forecast['ds'],
-                        y=forecast['trend'],
-                        name='Trend',
-                        line=dict(color='green')
-                    ),
-                    row=2, col=1
-                )
-                
-                # Plot yearly seasonality if available
-                if 'yearly' in forecast.columns:
-                    fig.add_trace(
-                        go.Scatter(
-                            x=forecast['ds'],
-                            y=forecast['yearly'],
-                            name='Yearly Seasonality',
-                            line=dict(color='purple')
-                        ),
-                        row=3, col=1
-                    )
-                
-                # Plot weekly seasonality if available
-                if 'weekly' in forecast.columns:
-                    fig.add_trace(
-                        go.Scatter(
-                            x=forecast['ds'],
-                            y=forecast['weekly'],
-                            name='Weekly Seasonality',
-                            line=dict(color='orange')
-                        ),
-                        row=3, col=1
-                    )
-            
-            # Update layout
-            fig.update_layout(
-                title='Prophet Forecast with Components',
-                showlegend=True,
-                width=self.figure_size[0],
-                height=self.figure_size[1]
-            )
-            
-            # Save plot
-            if output_path is None:
-                output_path = os.path.join(self.output_dir, f"forecast_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html")
-            
-            fig.write_html(output_path)
-            logger.info(f"Saved forecast plot to {output_path}")
-            
-        except Exception as e:
-            logger.error(f"Error plotting forecast: {str(e)}")
-            raise
-
-    def process(
-        self,
-        periods: Optional[int] = None,
-        include_history: bool = True,
-        output_file: Optional[str] = None
-    ) -> pd.DataFrame:
         """
-        Main processing function that orchestrates forecast generation and visualization.
+        Create an interactive plot of the forecast with components.
         
         Args:
-            periods (int, optional): Number of periods to forecast
-            include_history (bool): Whether to include historical data in the forecast
-            output_file (str, optional): Path to save the forecast data
-            
-        Returns:
-            pd.DataFrame: Generated forecast
+            results: Dictionary containing forecast and components
+            output_dir: Directory to save the plot
         """
-        try:
-            # Load model and metadata
-            model, metadata = self.load_latest_model()
-            
-            # Generate forecast
-            forecast = self.generate_forecast(
-                model,
-                periods=periods,
-                include_history=include_history
+        forecast = results['forecast']
+        history = results['history']
+        
+        # Get the last historical date
+        last_historical_date = history['ds'].max()
+        
+        # Create figure with secondary y-axis
+        fig = make_subplots(
+            rows=3,
+            cols=1,
+            subplot_titles=('Forecast', 'Trend', 'Seasonalities'),
+            vertical_spacing=0.1,
+            row_heights=[0.5, 0.25, 0.25]
+        )
+        
+        # Add historical data
+        fig.add_trace(
+            go.Scatter(
+                name='Historical',
+                x=history['ds'],
+                y=history['y'],
+                mode='lines',
+                line=dict(color='black', width=2),
+                showlegend=True
+            ),
+            row=1, col=1
+        )
+        
+        # Split forecast into historical and future periods
+        historical_forecast = forecast[forecast['ds'] <= last_historical_date]
+        future_forecast = forecast[forecast['ds'] > last_historical_date]
+        
+        # Add historical forecast (dashed line)
+        fig.add_trace(
+            go.Scatter(
+                name='Historical Forecast',
+                x=historical_forecast['ds'],
+                y=historical_forecast['yhat'],
+                mode='lines',
+                line=dict(color='blue', width=1, dash='dash'),
+                showlegend=True
+            ),
+            row=1, col=1
+        )
+        
+        # Add future forecast (solid line)
+        fig.add_trace(
+            go.Scatter(
+                name='Future Forecast',
+                x=future_forecast['ds'],
+                y=future_forecast['yhat'],
+                mode='lines',
+                line=dict(color='red', width=2),
+                showlegend=True
+            ),
+            row=1, col=1
+        )
+        
+        # Add confidence interval for future forecast only
+        fig.add_trace(
+            go.Scatter(
+                name='Confidence Interval',
+                x=pd.concat([future_forecast['ds'], future_forecast['ds'][::-1]]),
+                y=pd.concat([future_forecast['yhat_upper'], future_forecast['yhat_lower'][::-1]]),
+                fill='toself',
+                fillcolor='rgba(255,0,0,0.2)',
+                line=dict(color='rgba(255,0,0,0)'),
+                showlegend=True
+            ),
+            row=1, col=1
+        )
+        
+        # Add vertical line at the last historical date using shapes
+        fig.add_shape(
+            type="line",
+            x0=last_historical_date,
+            x1=last_historical_date,
+            y0=0,
+            y1=1,
+            yref="paper",
+            line=dict(color="gray", width=1, dash="dash"),
+            row=1,
+            col=1
+        )
+        
+        # Add annotation for the vertical line
+        fig.add_annotation(
+            x=last_historical_date,
+            y=1,
+            yref="paper",
+            text="Last Historical Date",
+            showarrow=False,
+            textangle=-90,
+            xanchor="right",
+            yanchor="bottom",
+            row=1,
+            col=1
+        )
+        
+        # Add trend if available
+        if 'trend' in forecast.columns:
+            fig.add_trace(
+                go.Scatter(
+                    name='Trend',
+                    x=forecast['ds'],
+                    y=forecast['trend'],
+                    mode='lines',
+                    line=dict(color='green', width=2),
+                    showlegend=True
+                ),
+                row=2, col=1
             )
-            
-            # Save forecast data if output path is provided
-            if output_file:
-                forecast.to_csv(output_file, index=False)
-                logger.info(f"Saved forecast data to {output_file}")
-            else:
-                # Save to default location
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                output_path = os.path.join(self.output_dir, f"forecast_{timestamp}.csv")
-                forecast.to_csv(output_path, index=False)
-                logger.info(f"Saved forecast data to {output_path}")
-            
-            # Create visualization
-            plot_path = os.path.join(self.output_dir, f"forecast_plot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html")
-            self.plot_forecast(
-                forecast,
-                history=model.history if include_history else None,
-                output_path=plot_path
+        
+        # Add seasonalities if available
+        seasonality_added = False
+        if 'yearly' in forecast.columns:
+            fig.add_trace(
+                go.Scatter(
+                    name='Yearly Seasonality',
+                    x=forecast['ds'],
+                    y=forecast['yearly'],
+                    mode='lines',
+                    line=dict(color='purple', width=1),
+                    showlegend=True
+                ),
+                row=3, col=1
             )
+            seasonality_added = True
+        
+        if 'weekly' in forecast.columns:
+            fig.add_trace(
+                go.Scatter(
+                    name='Weekly Seasonality',
+                    x=forecast['ds'],
+                    y=forecast['weekly'],
+                    mode='lines',
+                    line=dict(color='orange', width=1),
+                    showlegend=True
+                ),
+                row=3, col=1
+            )
+            seasonality_added = True
             
-            return forecast
-            
-        except Exception as e:
-            logger.error(f"Error in forecasting process: {str(e)}")
-            raise
-
-    def evaluate(
+        if not seasonality_added:
+            # If no seasonalities are available, adjust the layout
+            fig.update_layout(
+                height=800  # Reduce height since we don't need the seasonalities plot
+            )
+        else:
+            fig.update_layout(
+                height=1200
+            )
+        
+        # Update layout
+        symbol_name = history['y'].name if hasattr(history['y'], 'name') else 'Value'
+        fig.update_layout(
+            title={
+                'text': f'Prophet Forecast for {symbol_name}',
+                'y':0.95,
+                'x':0.5,
+                'xanchor': 'center',
+                'yanchor': 'top'
+            },
+            xaxis_title='Date',
+            yaxis_title=symbol_name,
+            showlegend=True,
+            template='plotly_white',
+            hovermode='x unified'
+        )
+        
+        # Update y-axes titles
+        fig.update_yaxes(title_text=symbol_name, row=1, col=1)
+        if 'trend' in forecast.columns:
+            fig.update_yaxes(title_text="Trend", row=2, col=1)
+        if seasonality_added:
+            fig.update_yaxes(title_text="Seasonality", row=3, col=1)
+        
+        # Save plot
+        os.makedirs(output_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filepath = os.path.join(output_dir, f"forecast_{timestamp}.html")
+        fig.write_html(filepath)
+        
+        logger.info(f"Forecast plot saved to {filepath}")
+    
+    def evaluate_forecast(
         self,
-        cross_validation: bool = False,
-        output_file: Optional[str] = None
+        forecast: pd.DataFrame,
+        actual: pd.DataFrame,
+        metrics: Optional[list[str]] = None
     ) -> Dict[str, float]:
         """
-        Evaluate forecast performance using test data or cross-validation.
+        Calculate forecast evaluation metrics.
         
         Args:
-            cross_validation (bool): Whether to use cross-validation for evaluation
-            output_file (str, optional): Path to save the evaluation results
+            forecast: Forecast DataFrame
+            actual: Actual values DataFrame
+            metrics: List of metrics to calculate
             
         Returns:
-            Dict[str, float]: Evaluation metrics
+            Dictionary of metric names and values
         """
-        try:
-            # Load model and metadata
-            model, metadata = self.load_latest_model()
+        if metrics is None:
+            metrics = ['rmse', 'mae', 'mape']
             
-            if cross_validation:
-                # Use cross-validation results if available
-                if 'metrics' not in metadata:
-                    raise ValueError("No cross-validation metrics available in model metadata")
-                metrics = metadata['metrics']
-            else:
-                # Load test data and generate forecast
-                test_data = self.load_test_data()
-                forecast = self.generate_forecast(
-                    model,
-                    periods=len(test_data),
-                    include_history=False
-                )
-                metrics = self.calculate_forecast_metrics(forecast, test_data)
+        results = {}
+        merged = pd.merge(
+            forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']],
+            actual[['ds', 'y']],
+            on='ds',
+            how='inner'
+        )
+        
+        if 'rmse' in metrics:
+            results['rmse'] = np.sqrt(((merged['y'] - merged['yhat']) ** 2).mean())
+        if 'mae' in metrics:
+            results['mae'] = abs(merged['y'] - merged['yhat']).mean()
+        if 'mape' in metrics:
+            results['mape'] = (abs(merged['y'] - merged['yhat']) / merged['y']).mean() * 100
             
-            # Save metrics if output path is provided
-            if output_file:
-                with open(output_file, 'w') as f:
-                    json.dump(metrics, f, indent=4)
-                logger.info(f"Saved evaluation metrics to {output_file}")
-            
-            return metrics
-            
-        except Exception as e:
-            logger.error(f"Error in evaluation process: {str(e)}")
-            raise
+        return results 
 
 def initialize() -> Forecasting:
     """Initialize the forecasting module with configuration."""
-    config = config_loader.load_config()
+    from ..utils.config_loader import load_config
+    config = load_config()
     return Forecasting(config)
 
-# Convenience functions for direct usage
-def process(**kwargs) -> pd.DataFrame:
-    """Convenience function to process forecasting."""
+def process(periods: int = 30, include_history: bool = True) -> Dict[str, Any]:
+    """
+    Convenience function for direct forecasting usage.
+    
+    Args:
+        periods: Number of periods to forecast
+        include_history: Whether to include historical data
+        
+    Returns:
+        Dictionary containing forecast results
+    """
     forecasting = initialize()
-    return forecasting.process(**kwargs)
-
-def evaluate(**kwargs) -> Dict[str, float]:
-    """Convenience function to evaluate forecasts."""
-    forecasting = initialize()
-    return forecasting.evaluate(**kwargs) 
+    model = forecasting.model
+    
+    # Generate forecast
+    results = forecasting.generate_forecast(
+        model=model,
+        periods=periods,
+        include_history=include_history
+    )
+    
+    return results 
