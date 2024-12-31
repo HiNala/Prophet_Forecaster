@@ -8,12 +8,66 @@ import numpy as np
 from typing import Dict, Any, List, Optional, Tuple
 import os
 from prophet import Prophet
+import prophet
 from prophet.diagnostics import cross_validation, performance_metrics
 import json
 import pickle
 import itertools
+import logging
+from tqdm import tqdm
+import time
+from datetime import datetime
 
 from ..utils import logger, config_loader
+
+logger = logging.getLogger(__name__)
+
+class ChainProgressCallback:
+    """Custom callback to track Prophet chain processing progress."""
+    def __init__(self):
+        self.chain_count = 0
+        self.total_chains = 0  # Will be set when first chain starts
+        self.start_time = None
+        self.pbar = None
+        self.current_operation = ""
+        
+    def __call__(self, msg):
+        """Called when a chain message is received."""
+        if "Iteration" in msg:
+            # Extract iteration information
+            try:
+                iter_info = msg.split()
+                current_iter = int(iter_info[1])
+                total_iter = int(iter_info[3].strip('/'))
+                
+                if self.start_time is None:
+                    self.start_time = time.time()
+                    self.pbar = tqdm(total=total_iter, desc="Training Progress")
+                
+                # Update progress bar
+                if self.pbar:
+                    self.pbar.n = current_iter
+                    self.pbar.refresh()
+                
+                # Calculate ETA
+                if current_iter > 0:
+                    elapsed = time.time() - self.start_time
+                    iter_per_sec = current_iter / elapsed
+                    remaining_iters = total_iter - current_iter
+                    eta = remaining_iters / iter_per_sec
+                    
+                    logger.info(f"Progress: {current_iter}/{total_iter} iterations (ETA: {eta:.1f}s)")
+            except Exception as e:
+                logger.debug(f"Error parsing iteration message: {e}")
+        
+        elif "Sampling" in msg:
+            chain_num = msg.split('[')[1].split(']')[0]
+            logger.info(f"Sampling chain {chain_num}")
+            
+        elif "finished" in msg.lower():
+            if self.pbar:
+                self.pbar.close()
+            logger.info("Sampling completed")
 
 class ModelTraining:
     def __init__(self, config: Dict[str, Any]):
@@ -353,6 +407,93 @@ class ModelTraining:
         except Exception as e:
             logger.error(f"Error in hyperparameter tuning: {str(e)}")
             raise
+
+    def train(self, data: Any, seasonality_mode: str = 'multiplicative') -> Prophet:
+        """Train Prophet model with basic configuration."""
+        logger.info("Initializing Prophet model training...")
+        
+        # Create progress callback
+        progress = ChainProgressCallback()
+        
+        # Configure Prophet model
+        model = Prophet(
+            seasonality_mode=seasonality_mode,
+            yearly_seasonality=True,
+            weekly_seasonality=True,
+            daily_seasonality=True
+        )
+        
+        # Set up progress tracking
+        model.stan_backend.logger = progress
+        
+        # Fit model
+        logger.info("Starting model training...")
+        model.fit(data)
+        
+        logger.info("Model training completed")
+        return model
+    
+    def train_with_tuning(self, data: Any, seasonality_mode: str = 'multiplicative') -> Prophet:
+        """Train Prophet model with hyperparameter tuning."""
+        logger.info("Initializing Prophet model training with hyperparameter tuning...")
+        
+        # Create progress callback
+        progress = ChainProgressCallback()
+        
+        # Configure Prophet model with tuning parameters
+        model = Prophet(
+            seasonality_mode=seasonality_mode,
+            yearly_seasonality=True,
+            weekly_seasonality=True,
+            daily_seasonality=True,
+            changepoint_prior_scale=0.05,
+            seasonality_prior_scale=10.0
+        )
+        
+        # Set up progress tracking
+        model.stan_backend.logger = progress
+        
+        # Fit model
+        logger.info("Starting model training with tuning...")
+        model.fit(data)
+        
+        logger.info("Model training with tuning completed")
+        return model
+    
+    def cross_validate(self, model: Prophet, data: Any) -> Dict[str, Any]:
+        """Perform cross-validation on trained model."""
+        logger.info("Starting cross-validation...")
+        
+        # Calculate appropriate CV parameters based on data size
+        n_days = len(data)
+        logger.info(f"Total training data points: {n_days}")
+        
+        # Set horizon to 20% of data size
+        horizon_days = max(min(n_days // 5, 30), 7)  # between 7 and 30 days
+        # Initial training size should be at least 50% of data
+        initial_days = max(n_days // 2, horizon_days * 3)
+        # Period should be around 10% of the horizon
+        period_days = max(horizon_days // 10, 1)
+        
+        logger.info(f"Cross-validation parameters: initial={initial_days} days, horizon={horizon_days} days, period={period_days} days")
+        
+        # Create progress callback for cross-validation
+        progress = ChainProgressCallback()
+        model.stan_backend.logger = progress
+        
+        # Perform cross-validation
+        cv_results = cross_validation(
+            model,
+            initial=f'{initial_days} days',
+            period=f'{period_days} days',
+            horizon=f'{horizon_days} days'
+        )
+        
+        # Calculate performance metrics
+        metrics = performance_metrics(cv_results)
+        
+        logger.info("Cross-validation completed")
+        return metrics
 
 def initialize() -> ModelTraining:
     """Initialize the model training module with configuration."""

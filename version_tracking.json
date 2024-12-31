@@ -1,10 +1,10 @@
 {
     "data": {
-        "lag_features": 8,
-        "rolling_features": 8,
-        "calendar_features": 8,
-        "prophet_features": 7,
-        "prepared_features": 7
+        "lag_features": 13,
+        "rolling_features": 13,
+        "calendar_features": 13,
+        "prophet_features": 12,
+        "prepared_features": 12
     },
     "models": {},
     "forecasts": {}
